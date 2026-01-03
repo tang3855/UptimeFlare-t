@@ -67,22 +67,25 @@ function formatStatusChangeNotification(
   }
 }
 
-function templateWebhookPlayload(payload: any, message: string) {
+function templateWebhookPlayload(payload: any, message: string, env: any) {
   for (const key in payload) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) {
-      if (payload[key] === '$MSG') {
-        payload[key] = message
+      if (typeof payload[key] === 'string') {
+        payload[key] = payload[key].replace('$MSG', message)
+        payload[key] = payload[key].replace(/\${env\.([a-zA-Z0-9_]+)}/g, (_: string, p1: string) => {
+          return env[p1] || _
+        })
       } else if (typeof payload[key] === 'object' && payload[key] !== null) {
-        templateWebhookPlayload(payload[key], message)
+        templateWebhookPlayload(payload[key], message, env)
       }
     }
   }
 }
 
-async function webhookNotify(webhook: WebhookConfig, message: string) {
+async function webhookNotify(env: any, webhook: WebhookConfig, message: string) {
   if (Array.isArray(webhook)) {
     for (const w of webhook) {
-      webhookNotify(w, message)
+      webhookNotify(env, w, message)
     }
     return
   }
@@ -93,11 +96,26 @@ async function webhookNotify(webhook: WebhookConfig, message: string) {
   try {
     let url = webhook.url
     let method = webhook.method
-    let headers = new Headers(webhook.headers as any)
+    let headers = new Headers()
+    
+    if (webhook.headers) {
+      for (const [k, v] of Object.entries(webhook.headers)) {
+        let value = v.toString()
+        value = value.replace(/\${env\.([a-zA-Z0-9_]+)}/g, (_: string, p1: string) => {
+          const val = env[p1]
+          if (!val) {
+             console.log(`[Config Substitution] WARNING: Environment variable '${p1}' is missing or empty. Please check your Cloudflare Worker settings.`)
+          }
+          return val || _
+        })
+        headers.append(k, value)
+      }
+    }
+    
     let payloadTemplated: { [key: string]: string | number } = JSON.parse(
       JSON.stringify(webhook.payload)
     )
-    templateWebhookPlayload(payloadTemplated, message)
+    templateWebhookPlayload(payloadTemplated, message, env)
     let body = undefined
 
     switch (webhook.payloadType) {
@@ -148,6 +166,7 @@ async function webhookNotify(webhook: WebhookConfig, message: string) {
 
 // Auxiliary function to format notification and send it via webhook
 const formatAndNotify = async (
+  env: any,
   monitor: MonitorTarget,
   isUp: boolean,
   timeIncidentStart: number,
@@ -185,7 +204,7 @@ const formatAndNotify = async (
       reason,
       workerConfig.notification?.timeZone ?? 'Etc/GMT'
     )
-    await webhookNotify(workerConfig.notification.webhook, notification)
+    await webhookNotify(env, workerConfig.notification.webhook, notification)
   } else {
     console.log(`Webhook not set, skipping notification for ${monitor.name}`)
   }
